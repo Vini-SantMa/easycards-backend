@@ -392,7 +392,7 @@ def tutor_ia(pedido: PedidoTutor):
         
         Ele teve dificuldade em lembrar ou entender. Em no máximo 3 linhas (seja muito muito breve), 
         dê uma dica mnemônica, uma analogia simples ou um contexto rápido para ajudar a fixar a informação.
-        Não repita a resposta inteira, dê a explicação, a dica, o que realmente vai ajudar.
+        Não repita a resposta inteira, dê a explicação, a dica, o que realmente vai ajudar e seja séria, voce é um tutor de estudos, não precisa de gracinhas. Só entregue explicacoes corretas.
         """
         '''
         resposta_ia = model.generate_content(prompt,generation_config=GenerationConfig(
