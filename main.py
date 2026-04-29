@@ -42,6 +42,14 @@ class AlgoritmoRepEspacada(EstrategiaRevisao):
         else:
             intervalo_novo = 0
         return datetime.now() + timedelta(days=intervalo_novo), intervalo_novo
+        
+class AlgoritmoIA(EstrategiaRevisao):
+    def calculo_proxima(self, card, nota: int):
+        if nota >= 3:
+            intervalo_novo = max(1, round(card.intervalo * 1.5))
+        else: 
+            intervalo_novo = 0
+        return datetime.now() + timedelta(days=intervalo_novo), intervalo_novo
 
 # Classes Basicas - Pilares    
 class BaseCard(ABC):
@@ -56,7 +64,10 @@ class BaseCard(ABC):
         return data_proxima
 
 class Cardmanual(BaseCard):
-    pass
+    def __init__(self, frente, verso, estrategia, anexo=None):
+        super().__init__(frente, verso, estrategia)
+        self.anexo = anexo
+        
 class CardIA(BaseCard):
     def __init__(self, frente, verso, estrategia, contexto):
         super().__init__(frente, verso, estrategia)
@@ -207,13 +218,19 @@ def processo_revisao(req: ReqProcessoRevisao):
     
     res = supabase.table("flashcards").select("*").eq("id", req.card_id).single().execute()
     dados = res.data #Buscando ocard atual dentro do banco de dados
+
+    if dados.get('tipo') == 'IA':
+        algoritmo = AlgoritmoIA()
+    else:
+        algoritmo = AlgoritmoRepEspacada()
+        
     
     erros_atuais = dados.get('erros_consecutivos', 0)
     if req.nota < 3:
         novos_erros = erros_atuais + 1
     else:
         novos_erros = 0
-    algoritmo = AlgoritmoRepEspacada()
+   # algoritmo = AlgoritmoRepEspacada()
     
     card_estudo = Cardmanual(dados['frente'], dados['verso'], algoritmo)
     card_estudo.intervalo = dados['intervalo'] # cria o objeto do card e pega o estado dele do banco
@@ -270,24 +287,25 @@ def criar_deck(deck: NovoDeck):
     except Exception as e:
         return {"status": "erro", "detalhes": str(e)}
 
-# 1. Listar todos os Decks
+# 1 Listar todos os Decks
 @app.get("/decks/{user_id}")
 def listar_decks(user_id: str):
     res = supabase.table("decks").select("*").eq("user_id", user_id).execute()
     return {"status": "sucesso", "decks": res.data}
 
-# 2. Listar cards de um deck específico
+# 2 Listar cards de um deck específico
 @app.get("/decks/{deck_id}/cards")
 def listar_cards_do_deck(deck_id: str):
     res = supabase.table("flashcards").select("*").eq("deck_id", deck_id).execute()
     return {"status": "sucesso", "cards": res.data}
 
-# 3. Criar Card Manual (Pode usar o mesmo modelo do Card IA ou um simplificado)
+# 3 Criar Card Manual 
 class CardSimples(BaseModel):
     deck_id: str
     user_id: str
     frente: str
     verso: str
+    anexo: str = None
 
 @app.post("/criar-card-manual")
 def criar_card_manual(card: CardSimples):
@@ -297,7 +315,8 @@ def criar_card_manual(card: CardSimples):
             "user_id": card.user_id,
             "frente": card.frente,
             "verso": card.verso,
-            "tipo": "manual"
+            "tipo": "manual", 
+            "metadata": card.anexo
         }).execute()
         return {"status": "sucesso"}
     except Exception as e:
