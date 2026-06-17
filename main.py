@@ -1,347 +1,527 @@
-import { useState, useEffect } from 'react'
-import { supabase } from './supabaseClient'
-import './App.css' // Importação do arquivo de estilos
+import os
+from dotenv import load_dotenv
+from abc import ABC, abstractmethod
+from datetime import datetime, timedelta, date
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from openai import OpenAI
+import json
+from supabase import create_client, Client
 
-function App() {
-  // --- ESTADOS DE AUTENTICAÇÃO ---
-  const [session, setSession] = useState(null)
-  const [emailAuth, setEmailAuth] = useState('')
-  const [senhaAuth, setSenhaAuth] = useState('')
-  const [streak, setStreak] = useState(0)
+load_dotenv()
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-    })
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session)
-    })
-    return () => subscription.unsubscribe()
-  }, [])
+client = OpenAI(
+    api_key=os.environ.get("GROQ_API_KEY"),
+    base_url="https://api.groq.com/openai/v1"
+)
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-  const handleCadastro = async () => {
-    const { error } = await supabase.auth.signUp({ email: emailAuth, password: senhaAuth })
-    if (error) alert(error.message)
-    else alert("Cadastro realizado! Você já pode entrar.")
-  }
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-  const handleLogin = async () => {
-    const { error } = await supabase.auth.signInWithPassword({ email: emailAuth, password: senhaAuth })
-    if (error) alert(error.message)
-  }
+# ----------------------------------------------------#
+# Base dos elementos 
+# -------------------------------------
 
-  const handleSair = async () => {
-    await supabase.auth.signOut()
-  }
+class EstrategiaRevisao(ABC):
+    @abstractmethod
+    def calculo_proxima(self, card, nota: int):
+        pass
 
-  // --- ESTADOS DO APP ---
-  const [aba, setAba] = useState('dashboard') 
-  const [texto, setTexto] = useState('')
-  const [cardsIA, setCardsIA] = useState([])
-  const [cardsRevisao, setCardsRevisao] = useState([])
-  const [cardAtualIdx, setCardAtualIdx] = useState(0)
-  const [mostrarVerso, setMostrarVerso] = useState(false)
-  const [nomeDeck, setNomeDeck] = useState('')
-  const [idDeckAtivo, setIdDeckAtivo] = useState(null) 
-  const [listaDecks, setListaDecks] = useState([])
-  const [cardsDoDeckSelecionado, setCardsDoDeckSelecionado] = useState([])
-  const [nomeDeckSelecionado, setNomeDeckSelecionado] = useState('')
-  const [estatisticas, setEstatisticas] = useState({ total: 0, maturidade: { aprendendo: 0, familiar: 0, dominado: 0 }, leeches: [], taxa_dominio: 0 })
-  const [explicacaoTutor, setExplicacaoTutor] = useState(null)
-  const [carregandoTutor, setCarregandoTutor] = useState(false)
+class AlgoritmoRepEspacada(EstrategiaRevisao):
+    def calculo_proxima(self, card, nota:int):
+        if nota >= 3:
+            intervalo_novo = max(1, round(card.intervalo * 2.5))
+        else:
+            intervalo_novo = 0
+        return datetime.now() + timedelta(days=intervalo_novo), intervalo_novo
+        
+class AlgoritmoIA(EstrategiaRevisao):
+    def calculo_proxima(self, card, nota: int):
+        if nota >= 3:
+            intervalo_novo = max(1, round(card.intervalo * 1.5))
+        else: 
+            intervalo_novo = 0
+        return datetime.now() + timedelta(days=intervalo_novo), intervalo_novo
 
-  useEffect(() => {
-    if (session) {
-      // Busca o Foguinho 🔥
-      fetch(`https://easycards-api.onrender.com/streak/${session.user.id}`)
-        .then(res => res.json())
-        .then(d => { if(d.status === 'sucesso') setStreak(d.streak) })
-
-      if (aba === 'meus_decks') fetch(`https://easycards-api.onrender.com/decks/${session.user.id}`).then(res => res.json()).then(d => setListaDecks(d.decks || []))
-      if (aba === 'dashboard') fetch(`https://easycards-api.onrender.com/estatisticas/${session.user.id}`).then(res => res.json()).then(d => { if(d.status === 'sucesso') setEstatisticas(d.dados) })
-      if (aba === 'revisar') carregarCardsRevisao()
-    }
-  }, [aba, session])
-
-  const carregarCardsDoDeck = async (deckId, deckNome) => {
-    const res = await fetch(`https://easycards-api.onrender.com/decks/${deckId}/cards`); 
-    const dados = await res.json();
-    setCardsDoDeckSelecionado(dados.cards); setNomeDeckSelecionado(deckNome);
-  }
-
-const handleCriarDeck = async () => {
-    if (!nomeDeck) return alert("Voce precisa nomear seu deck");
-    const res = await fetch('https://easycards-api.onrender.com/criar-deck', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nome: nomeDeck, user_id: session.user.id }) });
-    const dados = await res.json();
+# Classes Basicas - Pilares    
+class BaseCard(ABC):
+    def __init__(self, frente, verso, estrategia: EstrategiaRevisao):
+        self.frente = frente
+        self.verso = verso
+        self.intervalo = 0
+        self.estrategia = estrategia
     
-    if (dados.status === "sucesso") { 
-      setIdDeckAtivo(dados.id); 
-      alert(`Deck criado!`); 
-      carregarDecks(); 
-    } else {
-      alert(dados.detalhes);
-    }
-  };
+    def revisao(self, nota: int):
+        data_proxima, self.intervalo = self.estrategia.calculo_proxima(self, nota)
+        return data_proxima
 
-  const salvarCardsNoBanco = async () => {
-    if (!idDeckAtivo) return alert("Crie ou selecione um Deck primeiro!");
-    const cardsComDono = cardsIA.map(card => ({ ...card, user_id: session.user.id }));
-    await fetch('https://easycards-api.onrender.com/salvar-cards-ia', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deck_id: idDeckAtivo, cards: cardsComDono }) });
-    alert("✅ Cards salvos!"); setCardsIA([]); 
-  }
+class Cardmanual(BaseCard):
+    def __init__(self, frente, verso, estrategia, anexo=None):
+        super().__init__(frente, verso, estrategia)
+        self.anexo = anexo
+        
+class CardIA(BaseCard):
+    def __init__(self, frente, verso, estrategia, contexto):
+        super().__init__(frente, verso, estrategia)
+        self.contexto = contexto
 
-  const carregarCardsRevisao = async () => {
-    const res = await fetch(`https://easycards-api.onrender.com/cards-para-revisar/${session.user.id}`);
-    const dados = await res.json();
-    setCardsRevisao(dados.cards || []);
-    setCardAtualIdx(0);
-    setMostrarVerso(false);
-  }
+# ====================================================
+# INÍCIO DA IMPLEMENTAÇÃO DO PADRÃO CRIACIONAL: ABSTRACT FACTORY
+# ====================================================   
+class FabricaDeCardsAbstrata(ABC):
+    @abstractmethod
+    def criar_combo_revisao(self, dados) -> BaseCard:
+        pass
 
-  const enviarNota = async (nota) => {
-    setExplicacaoTutor(null);
-    const card = cardsRevisao[cardAtualIdx];
-    await fetch('https://easycards-api.onrender.com/processo-revisao', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ card_id: card.id, nota: nota, user_id: session.user.id}) });
+class FabricaCardManual(FabricaDeCardsAbstrata):
+    def criar_combo_revisao(self, dados) -> Cardmanual:
+        algoritmo = AlgoritmoRepEspacada()
+        card = Cardmanual(dados['frente'], dados['verso'], algoritmo)
+        card.intervalo = dados.get('intervalo', 0)
+        return card
+
+class FabricaCardIA(FabricaDeCardsAbstrata):
+    def criar_combo_revisao(self, dados) -> CardIA:
+        algoritmo = AlgoritmoIA()
+        contexto = dados.get('metadata', '') 
+        card = CardIA(dados['frente'], dados['verso'], algoritmo, contexto)
+        card.intervalo = dados.get('intervalo', 0)
+        return card
+
+# ====================================================
+# INÍCIO DO PADRÃO ESTRUTURAL: PROXY
+# ====================================================
+class TutorProxy:
+    @staticmethod
+    def obter_dica(frente: str, verso: str) -> str:
+        pergunta_chave = f"{frente} - {verso}"
+
+        # 1. Verifica no "cache" (Supabase)
+        try:
+            res = supabase.table("dicas_cache").select("dica").eq("pergunta", pergunta_chave).execute()
+            if res.data:
+                return res.data[0]["dica"] # Cache Hit: Devolve sem chamar a IA!
+        except Exception:
+            pass # Se der erro no banco ou não existir a tabela ainda, ignora e segue para a IA
+
+        # 2. Se não achou (Cache Miss), chama a IA
+        prompt = f"""
+        Aja como um professor particular empático. O aluno está estudando um flashcard:
+        - Pergunta: {frente}
+        - Resposta correta: {verso}
+        Ele teve dificuldade em lembrar. Em no máximo 3 linhas, dê uma dica mnemônica ou contexto rápido. 
+        Não repita a resposta inteira, dê a explicação e seja sério.
+        """
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=150,
+            temperature=0.7
+        )
+        resposta_ia = response.choices[0].message.content
+
+        # 3. Salva a nova dica no cache para o futuro
+        try:
+            supabase.table("dicas_cache").insert({
+                "pergunta": pergunta_chave,
+                "dica": resposta_ia
+            }).execute()
+        except Exception:
+            pass
+
+        return resposta_ia
+
+# ====================================================
+# INÍCIO DO PADRÃO COMPORTAMENTAL: COMMAND
+# ====================================================
+class ComandoRevisarCard:
+    def __init__(self, card_id: str, nota: int, dados_banco: dict):
+        self.card_id = card_id
+        self.nota = nota
+        
+        # Guarda o estado ANTERIOR para permitir o "Desfazer"
+        self.intervalo_antigo = dados_banco.get('intervalo', 0)
+        self.proxima_revisao_antiga = dados_banco.get('proxima_revisao')
+        self.erros_antigos = dados_banco.get('erros_consecutivos', 0)
     
-    if (cardAtualIdx < cardsRevisao.length - 1) { 
-      setCardAtualIdx(cardAtualIdx + 1); 
-      setMostrarVerso(false); 
-    } else { 
-      alert("🎉 Revisão concluída!"); 
-      // Lógica do Foguinho: Se estava em 0, vai para 1 visualmente.
-      setStreak(prev => (prev === 0 ? 1 : prev)); 
-      setAba('dashboard'); 
+    def executar(self, card_estudo):
+        if self.nota < 3:
+            novos_erros = self.erros_antigos + 1
+        else:
+            novos_erros = 0
+            
+        data_proxima = card_estudo.revisao(self.nota)
+        novo_intervalo = card_estudo.intervalo
+        
+        supabase.table("flashcards").update({
+            "intervalo": novo_intervalo,
+            "proxima_revisao": data_proxima.isoformat(),
+            "erros_consecutivos": novos_erros
+        }).eq("id", self.card_id).execute()
+        
+        return novo_intervalo, data_proxima, novos_erros
+
+    def desfazer(self):
+        # Proteção extra: impede que o código quebre ao tentar salvar dados vazios
+        dados_restaurar = {
+            "intervalo": self.intervalo_antigo if self.intervalo_antigo is not None else 0,
+            "erros_consecutivos": self.erros_antigos if self.erros_antigos is not None else 0
+        }
+        
+        # Só atualiza a data se ela realmente existia antes
+        if self.proxima_revisao_antiga is not None:
+            dados_restaurar["proxima_revisao"] = self.proxima_revisao_antiga
+
+        # Restaura o banco para o estado exato antes do clique
+        supabase.table("flashcards").update(dados_restaurar).eq("id", self.card_id).execute()
+
+# Armazena o último comando temporariamente na memória RAM
+ultimo_comando_executado = None
+
+# ====================================================
+# CONFIGURAÇÕES DO FASTAPI E ROTAS
+# ====================================================
+app = FastAPI(title = "Api EasyCards")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class ReqRevisao(BaseModel):
+    nota: int
+    frente: str
+    verso: str
+    
+@app.get("/")
+def home():
+    return {"mensagem": "API rodando em arquivo unico com Padrões GoF!"}
+    
+@app.post("/revisar-card")
+def simular_revisao(req: ReqRevisao):
+    meu_algoritmo = AlgoritmoRepEspacada()
+    card_atual = Cardmanual(req.frente, req.verso, meu_algoritmo)
+    proxima_data = card_atual.revisao(req.nota)
+    
+    return {
+        "status": "sucesso",
+        "frente": card_atual.frente,
+        "novo_intervalo(dias)": card_atual.intervalo,
+        "proxima_revisao": proxima_data.strftime("%Y-%m-%d %H: %M:%S")
     }
-  }
-
-  const pedirAjudaTutor = async () => {
-    setCarregandoTutor(true);
-    const card = cardsRevisao[cardAtualIdx];
-    try {
-      const res = await fetch('https://easycards-api.onrender.com/tutor-ia', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frente: card.frente, verso: card.verso }) });
-      const d = await res.json();
-      
-      // Agora o React te avisa se a cota estourar!
-      if (d.status === "sucesso") {
-        setExplicacaoTutor(d.explicacao);
-      } else {
-        alert("Erro no Tutor IA: " + d.detalhes); 
-      }
-      
-    } catch (error) { alert("Erro ao chamar o tutor."); }
-    setCarregandoTutor(false);
-  }
-
-  const desfazerUltimaNota = async () => {
-    try {
-      const res = await fetch('https://easycards-api.onrender.com/desfazer-revisao', { method: 'POST' });
-      const d = await res.json();
-      
-      if (d.status === 'sucesso') {
-        alert("Ação desfeita! O banco de dados voltou ao estado anterior.");
-        setCardAtualIdx(cardAtualIdx - 1); 
-        setMostrarVerso(false);
-      } else {
-        alert(d.mensagem);
-      }
-    } catch (error) { 
-      alert("Erro ao tentar desfazer a revisão."); 
+        
+@app.post("/popular-banco-teste")
+def popular_banco():
+    resposta_deck = supabase.table("decks").insert({"nome": "Estudos Biologia"}).execute()
+    
+    deck_id = resposta_deck.data[0]['id'] 
+    resposta_card = supabase.table("flashcards").insert({
+        "deck_id": deck_id,
+        "frente": "Qual parte do corpo é considerada o segundo coração?",
+        "verso": "É a panturrilha",
+        "tipo": "manual"
+        }).execute()    
+    
+    return{
+        "status": "sucesso",
+        "mensagem": "Deck e card salvos na nuvem banco de dados",
+        "card_salvo": resposta_card.data[0]
     }
-  }
+    
+class ReqGeracao_IA(BaseModel):
+    texto_contexto: str
+        
+@app.post("/gerar-cards-ia")
+def gerar_cards_comIA(req:ReqGeracao_IA):
+    prompt = f"""
+    Atue como assistente de estudos, com foco na criação de flashcards. Leia o texto abaixo e extraia os três conceitos mais importantes e formate-os como perguntas e respostas sucintas.
+    Retorne somente um JSON válido no seguinte formato de lista, sem explicações extras e sem blocos de código markdown (```json):
+    [
+        {{"frente": "pergunta", "verso": "resposta"}}
+    ]
+    Texto: {req.texto_contexto}
+    """
+    try: 
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "Você é um assistente que gera apenas JSON puro."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3 
+        )
+        texto_resposta = response.choices[0].message.content
+        texto_limpeza = texto_resposta.replace("```json", "").replace("```", "").strip()
+        cards_gerados = json.loads(texto_limpeza)
+        return{
+            "status": "sucesso",
+            "quantidade": len(cards_gerados),
+            "cards": cards_gerados
+        }
+    except Exception as e:
+        return{ "erro": "erro no processamento de IA", "detalhes": str(e)}
 
-  if (!session) {
-    return (
-      <div className="auth-container">
-        <div className="auth-box">
-          <h1 className="auth-title">🧠 Easy Cards</h1>
-          <p className="auth-subtitle">O seu mentor inteligente.</p>
-          <input className="auth-input" type="email" placeholder="Seu melhor e-mail" value={emailAuth} onChange={(e) => setEmailAuth(e.target.value)} />
-          <input className="auth-input" type="password" placeholder="Senha secreta" value={senhaAuth} onChange={(e) => setSenhaAuth(e.target.value)} />
-          <button className="auth-btn-login" onClick={handleLogin}>Entrar no Sistema</button>
-          <button className="auth-btn-register" onClick={handleCadastro}>Criar minha conta</button>
-        </div>
-      </div>
-    )
-  }
+class ListaCardsIA(BaseModel):
+    deck_id: str
+    cards: list
+    
+@app.post("/salvar-cards-ia")
+def salvar_cards_ia(req: ListaCardsIA):
+    try: 
+        dados_pra_banco = []
+        for card in req.cards:
+            dados_pra_banco.append({
+                "deck_id": req.deck_id,
+                "frente": card['frente'],
+                "verso": card['verso'],
+                "tipo": "IA"
+            })
+        resposta = supabase.table("flashcards").insert(dados_pra_banco).execute()
+        return {"status": "sucesso", "mensagem": f"{len(req.cards)} cards salvos corretamente"}
+    except Exception as e:
+        return { "status": "falhou", "detalhes": str(e)}
+    
+@app.get("/cards-para-revisar/{user_id}")
+def buscar_cards_revisao(user_id: str):
+    try:
+        agora = datetime.now().isoformat()
+        resposta = supabase.table("flashcards")\
+        .select("*")\
+        .eq("user_id", user_id)\
+        .lte("proxima_revisao", agora)\
+        .execute()
+        return {"status": "sucesso", "cards": resposta.data}
+    except Exception as e:
+        return { "status": "erro"}
 
-  return (
-    <div className="app-wrapper">
-      <div className="user-bar">
-        <div className="user-info">
-          <span className="user-email">👤 {session.user.email}</span>
-          <span className="streak-badge">🔥 {streak} Dias Seguidos</span>
-        </div>
-        <button className="btn-logout" onClick={handleSair}>Sair</button>
-      </div>
+class ReqProcessoRevisao(BaseModel):
+    card_id: str
+    nota: int
+    
+@app.post("/processo-revisao")
+def processo_revisao(req: ReqProcessoRevisao):
+    global ultimo_comando_executado
+    
+    res = supabase.table("flashcards").select("*").eq("id", req.card_id).single().execute()
+    dados = res.data 
 
-      <h1 className="app-title">🧠 Easy Cards</h1>
-      
-      <nav className="navbar">
-        <button onClick={() => setAba('dashboard')} className="nav-btn" style={{ backgroundColor: aba === 'dashboard' ? '#f39c12' : '#bdc3c7' }}>📊 Dashboard</button>
-        <button onClick={() => setAba('gerar')} className="nav-btn" style={{ backgroundColor: aba === 'gerar' ? '#2ecc71' : '#bdc3c7' }}>✨ Criar Cards</button>
-        <button onClick={() => setAba('revisar')} className="nav-btn" style={{ backgroundColor: aba === 'revisar' ? '#3498db' : '#bdc3c7' }}>📚 Estudar Hoje</button>
-        <button onClick={() => setAba('meus_decks')} className="nav-btn" style={{ backgroundColor: aba === 'meus_decks' ? '#9b59b6' : '#bdc3c7' }}>📂 Meus Decks</button>
-      </nav>
+    # 1. Uso do Abstract Factory
+    if dados.get('tipo') == 'IA':
+        fabrica = FabricaCardIA()
+    else:
+        fabrica = FabricaCardManual()
+   
+    card_estudo = fabrica.criar_combo_revisao(dados)
+    
+    # 2. Uso do Command
+    comando = ComandoRevisarCard(req.card_id, req.nota, dados)
+    novo_intervalo, data_proxima, novos_erros = comando.executar(card_estudo)
+    
+    # Guarda na memória o comando caso o usuário queira desfazer
+    ultimo_comando_executado = comando 
+    
+    user_id_do_card = dados['user_id']
+    hoje = date.today().isoformat()
+    
+    # Atualização do Streak
+    stats = supabase.table("user_stats").select("*").eq("user_id", user_id_do_card).execute()
+    
+    if not stats.data:
+        supabase.table("user_stats").insert({
+            "user_id": user_id_do_card, 
+            "streak": 1, 
+            "ultima_revisao": hoje
+        }).execute()
+    else:
+        ultima = stats.data[0].get("ultima_revisao")
+        streak_atual = stats.data[0].get("streak", 0)
+        
+        if ultima != hoje:
+            supabase.table("user_stats").update({
+                "streak": streak_atual + 1, 
+                "ultima_revisao": hoje
+            }).eq("user_id", user_id_do_card).execute()
+    
+    return{
+        "status": "sucesso", "erros": novos_erros, "novo_intervalo": novo_intervalo, "proxima_data": data_proxima.strftime("%Y-%m-%d")
+    }
 
-      {aba === 'dashboard' && (
-        <div className="dashboard-content">
-          <div className="stats-row">
-            <div className="stat-card bg-dark">
-              <p className="stat-label">Total de Cards</p>
-              <h2 className="stat-value">{estatisticas.total}</h2>
-            </div>
-            <div className="stat-card bg-green">
-              <p className="stat-label">Taxa de Domínio</p>
-              <h2 className="stat-value">{estatisticas.taxa_dominio}%</h2>
-            </div>
-          </div>
-          <h3 className="section-title">Maturidade do Conhecimento</h3>
-          <div className="maturity-row">
-            <div className="maturity-card border-red">
-              <h4 className="txt-red">🌱 Aprendendo</h4><p className="maturity-num">{estatisticas.maturidade.aprendendo}</p>
-            </div>
-            <div className="maturity-card border-yellow">
-              <h4 className="txt-yellow">🌿 Familiar</h4><p className="maturity-num">{estatisticas.maturidade.familiar}</p>
-            </div>
-            <div className="maturity-card border-green">
-              <h4 className="txt-green">🌳 Dominado</h4><p className="maturity-num">{estatisticas.maturidade.dominado}</p>
-            </div>
-          </div>
-          {estatisticas.leeches && estatisticas.leeches.length > 0 && (
-            <div className="leeches-alert">
-              <h3 className="leeches-title">⚠️ Alerta de Pontos Fracos (Leeches)</h3>
-              <ul className="leeches-list">
-                {estatisticas.leeches.map((l, i) => <li key={i}><strong>{l.erros_consecutivos} erros:</strong> {l.frente}</li>)}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
+# Rota nova para ativar o Padrão Command (Desfazer)
+@app.post("/desfazer-revisao")
+def desfazer_revisao():
+    global ultimo_comando_executado
+    try:
+        if ultimo_comando_executado is not None:
+            ultimo_comando_executado.desfazer()
+            ultimo_comando_executado = None 
+            return {"status": "sucesso", "mensagem": "Ação desfeita com sucesso. O card voltou ao estado original!"}
+        else:
+            return {"status": "erro", "mensagem": "Não há ações recentes para desfazer."}
+    except Exception as e:
+        # Agora, se houver falha, ele devolve a "mensagem" exata do erro e não "undefined"
+        return {"status": "erro", "mensagem": f"Erro interno ao tentar desfazer: {str(e)}"}
+    
+class NovoDeck(BaseModel):
+    nome: str
+    user_id: str
 
-      {aba === 'gerar' && (
-        <div className="gerar-content"> 
-          <div className="deck-selector">
-            <h3>1º Passo: Definir o Deck Alvo</h3>
-            <input className="input-deck" type="text" placeholder="Ex: Anatomia Humana" value={nomeDeck} onChange={(e) => setNomeDeck(e.target.value)} />
-            <button className="btn-create-deck" onClick={handleCriarDeck}>Criar Deck</button>
-            {idDeckAtivo && <p className="active-deck-txt">✅ Destino: {nomeDeck} (Ativo)</p>}
-          </div>
-          <div className="creation-methods">
-            <div className="method-card manual">
-              <h4>✍️ Criar Manualmente</h4>
-              <input className="full-input" placeholder="Digite a Pergunta..." id="manualFrente" />
-              <textarea className="full-input" placeholder="Digite a Resposta..." rows="3" id="manualVerso" />
+@app.post("/criar-deck")
+def criar_deck(deck: NovoDeck):
+    try:
+        # =========================================================
+        # TRATAMENTO DE EXCEÇÃO 
+        # =========================================================
+        # 1. Busca no banco se este usuário já tem um deck com esse exato nome
+        busca = supabase.table("decks").select("*").eq("user_id", deck.user_id).eq("nome", deck.nome).execute()
+        
+        # 2. Se a busca retornar algum resultado, a duplicidade foi detectada!
+        if len(busca.data) > 0:
+            # Levantamos a exceção ANTES do código tentar inserir no banco e quebrar
+            raise ValueError(f"O deck '{deck.nome}' já existe na sua conta!")
+        # =========================================================
 
-              <input className="full-input" placeholder="Link, Contexto ou Referência (Opcional)..." id="manualAnexo" />
-              
-              <button className="btn-save-manual" onClick={async () => {
-                if (!idDeckAtivo) return alert("Defina o Deck primeiro!");
-          
-                const f = document.getElementById('manualFrente').value;
-                const v = document.getElementById('manualVerso').value;
-                const a = document.getElementById('manualAnexo').value;
-                await fetch('https://easycards-api.onrender.com/criar-card-manual', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ deck_id: idDeckAtivo, user_id: session.user.id, frente: f, verso: v, anexo: a }) });
-                alert("Salvo!"); document.getElementById('manualFrente').value = ''; document.getElementById('manualVerso').value = ''; document.getElementById('manualAnexo').value = '';
-              }}>Salvar Card Manual</button>
-            </div>
-            <div className="method-card ia">
-              <h4>✨ Extração por IA</h4>
-              <textarea className="full-input" value={texto} onChange={(e) => setTexto(e.target.value)} rows="4" placeholder="Cole o texto aqui..." />
-              <button className="btn-extract-ia" onClick={async () => {
-                 const res = await fetch('https://easycards-api.onrender.com/gerar-cards-ia', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto_contexto: texto }) })
-                 const d = await res.json(); setCardsIA(d.cards);
-              }}>Extrair Cards</button>
-            </div>
-          </div>
-          {cardsIA.length > 0 && (
-            <div className="ia-review">
-              <h3>Revise e Edite:</h3>
-              {cardsIA.map((c, i) => (
-                <div key={i} className="edit-card">
-                  <textarea className="edit-area" value={c.frente} onChange={(e) => { const novos = [...cardsIA]; novos[i].frente = e.target.value; setCardsIA(novos); }} rows="2" />
-                  <textarea className="edit-area" value={c.verso} onChange={(e) => { const novos = [...cardsIA]; novos[i].verso = e.target.value; setCardsIA(novos); }} rows="2" />
-                </div>
-              ))}
-              <button className="btn-save-all" onClick={salvarCardsNoBanco}>💾 Salvar Tudo</button>
-            </div>
-          )}
-        </div>
-      )}
+        # Se passou pela verificação, insere normalmente
+        resposta = supabase.table("decks").insert({"nome": deck.nome, "user_id": deck.user_id}).execute()
+        id_gerado = resposta.data[0]['id']
+        return {"status": "sucesso", "id": id_gerado, "nome": deck.nome}
+    
+    except ValueError as erro_duplicidade:
+        # Tratamento ESPECÍFICO para o erro que nós mesmos levantamos
+        return {"status": "erro", "detalhes": str(erro_duplicidade)}
+        
+    except Exception as e:
+        # Tratamento GENÉRICO caso o banco de dados caia ou fique sem internet
+        return {"status": "erro", "detalhes": "Erro interno no servidor. Tente novamente."}
 
-      {aba === 'revisar' && (
-        <div className="revisar-content">
-          <h2>Sessão de Estudos</h2>
-          {cardAtualIdx > 0 && (
-            <button onClick={desfazerUltimaNota} className="btn-undo">
-              ↩️ Ops, cliquei errado! Desfazer nota anterior
-            </button>
-          )}
-          {cardsRevisao.length > 0 ? (
-            <div className="study-card">
-              <h3 className="card-frente">{cardsRevisao[cardAtualIdx].frente}</h3>
-              {mostrarVerso ? (
-                <div>
-                  <hr className="card-divider"/>
-                  <p className="card-verso">{cardsRevisao[cardAtualIdx].verso}</p>
-                   {cardsRevisao[cardAtualIdx].metadata && ( <div className="card-metadata-box">
-                     <p className="metadata-label">🔗 Referência de Estudo:</p>
-                     <p className="metadata-content">{cardsRevisao[cardAtualIdx].metadata}</p>
-                   </div>
-                      )}
-                  <div className="btn-group">
-                    <button onClick={() => enviarNota(0)} className="btn-note btn-red">0 - Errei</button>
-                    <button onClick={() => enviarNota(3)} className="btn-note btn-blue">3 - Difícil</button>
-                    <button onClick={() => enviarNota(5)} className="btn-note btn-green">5 - Fácil</button>
-                  </div>
-                  <div className="tutor-section">
-                    {!explicacaoTutor && !carregandoTutor && (
-                      <button onClick={pedirAjudaTutor} className="btn-tutor">🤖 Não entendi. Pedir dica ao Tutor IA</button>
-                    )}
-                    {carregandoTutor && <p className="tutor-loading">O tutor está formulando uma dica...</p>}
-                    {explicacaoTutor && (
-                      <div className="tutor-result">
-                        <h4 className="tutor-header">💡 Dica do Mentor:</h4>
-                        <p className="tutor-text">{explicacaoTutor}</p>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <button onClick={() => setMostrarVerso(true)} className="btn-show">👀 Mostrar Resposta</button>
-              )}
-            </div>
-          ) : (<p>✅ Você já revisou todos os cards de hoje.</p>)}
-        </div>
-      )}
+@app.get("/decks/{user_id}")
+def listar_decks(user_id: str):
+    res = supabase.table("decks").select("*").eq("user_id", user_id).execute()
+    return {"status": "sucesso", "decks": res.data}
 
-      {aba === 'meus_decks' && (
-        <div className="decks-content">
-          <h2>📂 Gerenciador de Decks</h2>
-          <div className="decks-layout">
-            <div className="decks-list">
-              {listaDecks.map((deck) => (
-                <button key={deck.id} onClick={() => carregarCardsDoDeck(deck.id, deck.nome)} className="deck-item">📘 {deck.nome}</button>
-              ))}
-            </div>
-            <div className="deck-viewer">
-              {nomeDeckSelecionado ? (
-                <>
-                  <h4>Cards em: {nomeDeckSelecionado}</h4>
-                  <div className="cards-scroll">
-                    {cardsDoDeckSelecionado.map((card, idx) => (
-                      <div key={idx} className="card-list-item">
-                        <p><strong>P:</strong> {card.frente}</p><p><strong>R:</strong> {card.verso}</p>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              ) : (<p></p>)}
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
+@app.get("/decks/{deck_id}/cards")
+def listar_cards_do_deck(deck_id: str):
+    res = supabase.table("flashcards").select("*").eq("deck_id", deck_id).execute()
+    return {"status": "sucesso", "cards": res.data}
 
-export default App
+class CardSimples(BaseModel):
+    deck_id: str
+    user_id: str
+    frente: str
+    verso: str
+    anexo: str = None
+
+@app.post("/criar-card-manual")
+def criar_card_manual(card: CardSimples):
+    try:
+        supabase.table("flashcards").insert({
+            "deck_id": card.deck_id,
+            "user_id": card.user_id,
+            "frente": card.frente,
+            "verso": card.verso,
+            "tipo": "manual", 
+            "metadata": card.anexo
+        }).execute()
+        return {"status": "sucesso"}
+    except Exception as e:
+        return {"status": "erro", "detalhes": str(e)}
+
+@app.get("/estatisticas/{user_id}")
+def obter_estatisticas(user_id: str):
+    try:
+        res = supabase.table("flashcards").select("intervalo, erros_consecutivos, frente").eq("user_id", user_id).execute()
+        all_cards = res.data if res.data else []
+        
+        aprendendo = len([c for c in all_cards if c.get('intervalo', 0) < 3])
+        familiar = len([c for c in all_cards if 3 <= c.get('intervalo', 0) <= 21])
+        dominado = len([c for c in all_cards if c.get('intervalo', 0) > 21])
+        
+        pontos_fracos = [{"frente": c["frente"], "erros_consecutivos": c["erros_consecutivos"]} 
+                   for c in all_cards if c.get('erros_consecutivos', 0) >= 3]
+
+        return {
+            "status": "sucesso",
+            "dados": {
+                "total": len(all_cards),
+                "maturidade": {"aprendendo": aprendendo, "familiar": familiar, "dominado": dominado},
+                "pontos_fracos": pontos_fracos,
+                "taxa_dominio": round((dominado / len(all_cards) * 100), 1) if all_cards else 0
+            }
+        }
+    except Exception as e:
+        return {"status": "erro", "detalhes": str(e)}
+
+@app.get("/streak/{user_id}")
+def obter_streak(user_id: str):
+    try:
+        res = supabase.table("user_stats").select("*").eq("user_id", user_id).execute()
+        
+        if not res.data:
+            return {"status": "sucesso", "streak": 0}
+            
+        dados = res.data[0]
+        streak_atual = dados.get("streak", 0)
+        ultima_revisao_str = dados.get("ultima_revisao")
+        
+        if ultima_revisao_str:
+            ultima_revisao = date.fromisoformat(ultima_revisao_str)
+            hoje = date.today()
+            if (hoje - ultima_revisao).days > 1:
+                streak_atual = 0 
+                
+        return {"status": "sucesso", "streak": streak_atual}
+    except Exception as e:
+        return {"status": "erro", "detalhes": str(e)}
+    
+class PedidoTutor(BaseModel):
+    frente: str
+    verso: str
+
+@app.post("/tutor-ia")
+def tutor_ia(pedido: PedidoTutor):
+    try:
+        # A chamada limpa usando o Padrão Proxy
+        resposta_ia = TutorProxy.obter_dica(pedido.frente, pedido.verso)
+        return {"status": "sucesso", "explicacao": resposta_ia}
+    except Exception as e:
+        return {"status": "erro", "detalhes": str(e)}
+
+@app.get("/enviar-lembretes")
+def enviar_lembretes_estudo():
+    try:
+        agora = datetime.now().isoformat()
+        res = supabase.table("flashcards")\
+            .select("user_id")\
+            .lte("proxima_revisao", agora)\
+            .execute()
+
+        cards_vencidos = res.data
+
+        if not cards_vencidos:
+            return {
+                "status": "sucesso", 
+                "mensagem": "Todos estão em dia! Nenhum lembrete necessário."
+            }
+
+        usuarios_para_notificar = set()
+        for card in cards_vencidos:
+            usuarios_para_notificar.add(card['user_id'])
+
+        relatorio_envios = []
+        for user in usuarios_para_notificar:
+            mensagem = f"🔔 PUSH ENVIADO: Usuário {user}, você tem revisões pendentes no EasyCards!"
+            print(mensagem) 
+            relatorio_envios.append(mensagem)
+
+        return {
+            "status": "sucesso",
+            "total_notificados": len(usuarios_para_notificar),
+            "detalhes": relatorio_envios
+        }
+
+    except Exception as e:
+        return {"status": "erro", "detalhes": str(e)}
